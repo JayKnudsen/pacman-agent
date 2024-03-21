@@ -1,5 +1,6 @@
 # baselineTeam.py
 # ---------------
+#v7?
 # Licensing Information:  You are free to use or extend these projects for
 # educational purposes provided that (1) you do not distribute or publish
 # solutions, (2) you retain this notice, and (3) you provide clear
@@ -35,11 +36,12 @@ OBSERVATION_RANGE = 5
 #the opposing team. It is generally risk-averse i.e. 'win by a few' or 'prevent capture'
 # 
 # It does this offensively by implementing a strategy to gather food and 
-# and quickly return to its side. It will return either because it is holding more than 8 or
+# and quickly return to its side. It will return either because it is holding more than 6 or
 # because it is being chased and making it to the home side is a viable option.
 # It will not seek out food when being chased and will try to avoid corners (usually...)
 # It will only be aggressive when it has the power pellet and enemies are scared. 
 # Otherwise it generally uses minimax with a-b pruning to play chicken with the opponent.
+# Now has a function to help it get out of a stuck cycle by forcing moving in home-side coordinate directions.
 #
 # The defensive strategy is somewhat of a "dragons nest" approach. As soon as an invader
 # gets stopped and looses its food, the defensive Pacman will bogart right on top of the pile
@@ -145,12 +147,22 @@ class ReflexCaptureAgent(CaptureAgent): #methods are utilized here to save time
         """
         return {'successor_score': 1.0}
 
+#----------------------------------------------------------------
+
 
 class OffensiveReflexAgent(ReflexCaptureAgent):
     """
     This agent is designed to be risk averse and bring back small quantities of food 
-    while the defensive agent holds off the enemy
+    while the defensive agent holds off the enemy. Not great at evading so since the preliminary contest, 
+    he only eats 6 instead of 8 to be full and has cycle-breaking function
     """
+
+    def __init__(self, index, time_for_computing=.1):
+        super().__init__(index, time_for_computing) #call parent
+        self.chase_timer = 0 #keep track of the number of steps the agent has been chasing an invader on the home side
+        self.move_history = [] #Store prev moves
+        self.repeat_count = 0 # Num of moves in a sequence
+        self.depth_limit = 5  # Set the depth limit to a suitable value
 
     def choose_action(self, game_state):
 
@@ -160,14 +172,13 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         if len(actions) == 0:
             return None
 
-        # If the agent is not a Pacman (i.e., it's a Ghost), use the normal method
+        # Error debug- if the agent is not a Pacman (ghost), use the normal method
         if not game_state.get_agent_state(self.index).is_pacman:
             return super().choose_action(game_state)
 
-
         ###Primary Risk-Averse Strategy#### 
-        # If the agent is carrying more than 8 food, call pcmn_full
-        if game_state.get_agent_state(self.index).num_carrying > 8:
+        # If the agent is carrying more than 5 food, call pcmn_full
+        if game_state.get_agent_state(self.index).num_carrying > 5:
             return self.pcmn_full(game_state)
 
         my_pos = game_state.get_agent_state(self.index).get_position() #Get Current position
@@ -177,13 +188,22 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         invaders = [a for a in enemies if a.is_pacman and a.get_position() != None]#Current invaders and their positions
         min_ghost_distance = min([self.get_maze_distance(my_pos, ghost.get_position()) for ghost in ghosts]) if ghosts else float("inf")#Agents position to ghost
 
-        
+        # If the agent is on the home side and there is an invader within observation range, chase the invader for up to 20 steps
+        if not game_state.get_agent_state(self.index).is_pacman and invaders:
+            nearest_invader = min(invaders, key=lambda a: self.get_maze_distance(my_pos, a.get_position()))
+            if self.get_maze_distance(my_pos, nearest_invader.get_position()) <= OBSERVATION_RANGE:
+                if self.chase_timer < 20:
+                    self.chase_timer += 1
+                    return self.chase_invader(game_state, nearest_invader)
+                else:
+                    self.chase_timer = 0
+
         ### Only Aggressive Move for Offensive Pacman###
         # If Pacman has eaten a power pellet and the opposing team is in a scared state, go into offensive attack mode
         if scared_ghosts:
             return self.offensive_attack(game_state, scared_ghosts)
 
-        # If theres a ghost within 3 spaces and Pacman can get to a power pellet before being eaten by a ghost, go for the pellet
+        # If there's a ghost within 3 spaces and Pacman can get to a power pellet before being eaten by a ghost, go for the pellet
         power_pellets = self.get_capsules(game_state)
         if power_pellets and any(self.get_maze_distance(my_pos, ghost.get_position()) <= 3 for ghost in ghosts):
             min_pellet_distance = min([self.get_maze_distance(my_pos, pellet) for pellet in power_pellets])
@@ -211,6 +231,17 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
             return best_action
 
+          # Check if Pacman is stuck in a loop on his home side
+        if not game_state.get_agent_state(self.index).is_pacman:
+            self.move_history.append(game_state.get_agent_state(self.index).get_position())
+            if len(self.move_history) > 8:
+                self.move_history.pop(0)
+                if self.move_history.count(self.move_history[-1]) >= 5:
+                    self.repeat_count += 1
+                    if self.repeat_count >= 5:
+                        game_state = self.break_cycle(game_state)
+            else:
+                self.repeat_count = 0
 
         ###Play Defensive Chicken - Ideally Bring food home in process###
         # If there's a ghost within 3 steps, use MiniMax with Alpha-Beta pruning
@@ -251,28 +282,93 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         return None
 
 
+    #function to get Pacman to move around a little bit if he gets stuck doing the same moves over and over agin 
+    def break_cycle(self, game_state):
+        # Get Pacmans current position
+        my_pos = game_state.get_agent_state(self.index).get_position()
+
+        # Get direction of Pacmans home side (left or right)
+        home_direction = Directions.WEST if self.red else Directions.EAST
+
+        # Arbitrary sequence of moves to break the cycle
+        moves = [Directions.NORTH] * 3 + [Directions.SOUTH] * 3 + [home_direction] * 3
+
+        # Define the maximum number of iterations
+        max_iterations = 10
+
+        # Execute the sequence of moves
+        for i in range(max_iterations):
+            if i >= len(moves):
+                break
+
+            move = moves[i]
+
+            # Check if the move is legal
+            if move in game_state.get_legal_actions(self.index):
+                # Update game state with the move
+                game_state = game_state.generate_successor(self.index, move)
+                my_pos = game_state.get_agent_state(self.index).get_position()
+            else:
+                # If the move is not legal, try to find an alternative move
+                legal_moves = game_state.get_legal_actions(self.index)
+                if Directions.STOP in legal_moves:
+                    legal_moves.remove(Directions.STOP)
+                if len(legal_moves) > 0:
+                    # Choose a random legal move
+                    alternative_move = random.choice(legal_moves)
+                    game_state = game_state.generate_successor(self.index, alternative_move)
+                    my_pos = game_state.get_agent_state(self.index).get_position()
+
+        # Reset the repeat count and move history
+        self.repeat_count = 0
+        self.move_history = []
+
+        # Return the final game state after executing the sequence of moves
+        return game_state
+
+
+        #Function so pacman goes after invaders on his home side for a bit, pretty self explainatory
+    def chase_invader(self, game_state, invader):
+        my_pos = game_state.get_agent_state(self.index).get_position()
+        actions = game_state.get_legal_actions(self.index)
+        best_action = None
+        min_distance = float("inf")
+
+        for action in actions:
+            successor = game_state.generate_successor(self.index, action)
+            next_pos = successor.get_agent_state(self.index).get_position()
+            distance = self.get_maze_distance(next_pos, invader.get_position())
+            if distance < min_distance:
+                min_distance = distance
+                best_action = action
+
+        return best_action
+
+
+    #Had issues during the contest, tried to fix indexing.
     def min_value(self, game_state, depth, alpha, beta, ghost_index):
-        if depth == 0 or game_state.is_over():
+        if depth == 0 or game_state.is_over() or depth > self.depth_limit:
             return self.evaluate(game_state, Directions.STOP)
 
-        v = float("inf") #initialize value variable 
+        v = float("inf") #initalize value var
 
-    # Check if the ghost is observable
-        if game_state.get_agent_state(ghost_index).get_position() is not None:
-            for action in game_state.get_legal_actions(ghost_index):
-                if ghost_index == game_state.get_num_agents() - 1: #whos turn & generate successor states
-                    v = min(v, self.max_value(game_state.generate_successor(ghost_index, action), depth - 1, alpha, beta))
-                else:
-                    v = min(v, self.min_value(game_state.generate_successor(ghost_index, action), depth, alpha, beta, ghost_index + 1))
-                if v < alpha: #Prune this branch
-                    return v
-                beta = min(beta, v)
+        # Check if the ghost index is within the valid range
+        if 0 <= ghost_index < game_state.get_num_agents():
+            # Check if the ghost is observable
+            if game_state.get_agent_state(ghost_index).get_position() is not None:
+                for action in game_state.get_legal_actions(ghost_index):
+                    if ghost_index == game_state.get_num_agents() - 1: #whos turn & generate successor states
+                        v = min(v, self.max_value(game_state.generate_successor(ghost_index, action), depth - 1, alpha, beta))
+                    else:
+                        v = min(v, self.min_value(game_state.generate_successor(ghost_index, action), depth, alpha, beta, ghost_index + 1))
+                    if v < alpha: #Prune this branch
+                        return v
+                    beta = min(beta, v)
 
         return v
 
-
     def max_value(self, game_state, depth, alpha, beta):
-        if depth == 0 or game_state.is_over():
+        if depth == 0 or game_state.is_over() or depth > self.depth_limit:
             return self.evaluate(game_state, Directions.STOP)
 
         v = float("-inf") #initialize value variable 
@@ -285,7 +381,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         return v
 
 
-    #Strategy to return home if pacman has more than 8 food pellets (see above)
+    #Strategy to return home if pacman has more than 5 food pellets (see above) - REVISED
     def pcmn_full(self, game_state):
         actions = game_state.get_legal_actions(self.index)
         best_distance = float("inf")
@@ -307,6 +403,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         return best_action
 
     #Added behavior for when Pacman has eaten the power pellet to be aggressive (see choose_action)
+    #should maybe reduce to 30 moves here if time
     def offensive_attack(self, game_state, ghosts):
         actions = game_state.get_legal_actions(self.index)
         best_distance = float("inf")
@@ -383,7 +480,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
             features['corner'] = 1
 
         #To help head home once it has half of food needed to win
-        if game_state.get_agent_state(self.index).num_carrying > 8:
+        if game_state.get_agent_state(self.index).num_carrying > 5:
             features['full_pacman'] = 1
         else:
             features['full_pacman'] = 0
@@ -403,7 +500,6 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
 
 
-
     def get_weights(self, game_state, action):
         return {'successor_score': 100, 'distance_to_food': -1, 'distance_to_ghost': 2, 'distance_to_home': -1, 'chased_by_ghost': 1000, 'can_reach_pellet': -1000, 'full_pacman': -1000,'dead_end': -2000}
 
@@ -413,23 +509,28 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
 #---------------------------------------------------------------
 
+
 class DefensiveReflexAgent(ReflexCaptureAgent):
     """
-This agent is designed to be like a dragon guarding its stash of coins
-Once the invader gets eaten and drops their food, this agent will bogart 
+    This agent is designed to move around the board between coins until there is a pile of at leat 4 within a moore
+    neighborhood and then stay there and bogart it like a dragon on a hoard of coins. Updated since preliminary contest
     """
-    def choose_action(self, game_state):
-        actions = game_state.get_legal_actions(self.index)
 
+    def __init__(self, index, time_for_computing=.1):
+        super().__init__(index, time_for_computing)
+        self.target_position = None #future food he will move to
+        self.depth_limit = 5  #To make sure no moves take more than 1 second. Issues from before
+
+    def choose_action(self, game_state):
+
+        #Same idea as offenisve 
+        actions = game_state.get_legal_actions(self.index)
         my_state = game_state.get_agent_state(self.index)
+        my_pos = my_state.get_position()
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
         invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
 
-        # If the agent is in a scared state and there are invaders, use MiniMax with Alpha-Beta pruning
-        
-        #Same logic as in offensive_pacman, comments listed in that section
-        #Main difference is that it occurs while defensive agent is scared
-
+        # If agent is in a scared state and there are invaders, use MiniMax with A-B pruning to avoid them
         if my_state.scared_timer > 0 and invaders:
             best_value = float("-inf")
             alpha = float("-inf")
@@ -445,84 +546,98 @@ Once the invader gets eaten and drops their food, this agent will bogart
 
             return best_action
         else:
-            # If there are no invaders or the agent is not in a scared state, use the default behavior
-            return max(actions, key=lambda a: self.evaluate(game_state, a))
+            # If there are invaders and agent not scared, attack the closest invader
+            if invaders:
+                closest_invader = min(invaders, key=lambda a: self.get_maze_distance(my_pos, a.get_position())) #takes an invader a and returns distance between current position and invader's position
+                best_action = min(actions, key=lambda a: self.get_maze_distance(game_state.generate_successor(self.index, a).get_agent_state(self.index).get_position(), closest_invader.get_position()))
+                return best_action
+            else:
+                # check if there is a pile of at least 4 food pellets in a Moore neighborhood
+                food = self.get_food_you_are_defending(game_state)
+                food_positions = food.as_list()
 
-    def min_value(self, game_state, depth, alpha, beta, invader_index):
-        if depth == 0 or game_state.is_over():
+                neighborhood = [(my_pos[0] + dx, my_pos[1] + dy) for dx in range(-1, 2) for dy in range(-1, 2)]
+                food_concentration = sum(1 for pos in neighborhood if pos in food_positions)
+
+                if food_concentration >= 4:
+                    # stay in the Moore neighborhood with high concentration of food pellets
+                    best_action = max(actions, key=lambda a: self.evaluate(game_state, a))
+                    return best_action
+                else:
+                    # Move between food pellets that are at least 4 spaces away - maybe modify this later? 
+                    if self.target_position is None or self.get_maze_distance(my_pos, self.target_position) < 4:
+                        if food_positions:
+                            self.target_position = random.choice(food_positions)
+                        else:
+                            self.target_position = None
+
+                    if self.target_position:
+                        best_action = min(actions, key=lambda a: self.get_maze_distance(game_state.generate_successor(self.index, a).get_agent_state(self.index).get_position(), self.target_position))
+                        return best_action
+                    else:
+                        return random.choice(actions)
+    #corrected for error
+    def min_value(self, game_state, depth, alpha, beta, ghost_index):
+        if depth == 0 or game_state.is_over() or depth > self.depth_limit:
             return self.evaluate(game_state, Directions.STOP)
 
-        v = float("inf")
+        v = float("inf") #initalize value var
 
-        # Check if the invader is observable
-        if game_state.get_agent_state(invader_index).get_position() is not None:
-            for action in game_state.get_legal_actions(invader_index):
-                if invader_index == game_state.get_num_agents() - 1:
-                    v = min(v, self.max_value(game_state.generate_successor(invader_index, action), depth - 1, alpha, beta))
-                else:
-                    v = min(v, self.min_value(game_state.generate_successor(invader_index, action), depth, alpha, beta, invader_index + 1))
-                if v < alpha:
-                    return v
-                beta = min(beta, v)
+        # Check if the ghost index is within the valid range
+        if 0 <= ghost_index < game_state.get_num_agents():
+            # Check if the ghost is observable
+            if game_state.get_agent_state(ghost_index).get_position() is not None:
+                for action in game_state.get_legal_actions(ghost_index):
+                    if ghost_index == game_state.get_num_agents() - 1: #whos turn & generate successor states
+                        v = min(v, self.max_value(game_state.generate_successor(ghost_index, action), depth - 1, alpha, beta))
+                    else:
+                        v = min(v, self.min_value(game_state.generate_successor(ghost_index, action), depth, alpha, beta, ghost_index + 1))
+                    if v < alpha: #Prune this branch
+                        return v
+                    beta = min(beta, v)
 
         return v
 
     def max_value(self, game_state, depth, alpha, beta):
-        if depth == 0 or game_state.is_over():
+        if depth == 0 or game_state.is_over() or depth > self.depth_limit:
             return self.evaluate(game_state, Directions.STOP)
 
-        v = float("-inf")
+        v = float("-inf") #initialize value variable 
         for action in game_state.get_legal_actions(self.index):
             v = max(v, self.min_value(game_state.generate_successor(self.index, action), depth, alpha, beta, self.index + 1))
-            if v > beta:
+            if v > beta: #Prune this branch
                 return v
             alpha = max(alpha, v)
 
         return v
 
     def get_features(self, game_state, action):
+        #number of invaeders, defense/offensive toggle, distance to invaders, stop & reverse 
         features = util.Counter()
         successor = self.get_successor(game_state, action)
 
         my_state = successor.get_agent_state(self.index)
         my_pos = my_state.get_position()
-        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
 
-        # Computes whether we're on defense (1) or offense (0)
+        # Computes whether we're on defense 
+        #originally used to turn on minimizer or maximizer for a/b pruning but had issues. 
         features['on_defense'] = 1
         if my_state.is_pacman: features['on_defense'] = 0
 
         # Computes distance to invaders we can see
+        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
+        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
         features['num_invaders'] = len(invaders)
         if len(invaders) > 0:
-            #find distance to each invader
             dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
             features['invader_distance'] = min(dists)
 
-        #For avoiding 
+        #Update stop and reverse in dict
         if action == Directions.STOP: features['stop'] = 1
         rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
         if action == rev: features['reverse'] = 1
 
-        # Encourage moving away from invaders when in a scared state and keeping invaders within observation radius
-        if my_state.scared_timer > 0 and invaders:  # If the agent is in a scared state and there are invaders
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = -min(dists)  # Encourage moving away from invaders
-
-            # Encourage keeping invaders within observation radius
-            features['invader_in_radius'] = 1 if min(dists) <= OBSERVATION_RANGE else 0
-
-        #Bogart where there are lots of coins. Make invaders come to us
-        #uses the idea of a moore neighborhood
-        if not invaders:  # If there are no invaders
-            food = self.get_food_you_are_defending(successor)
-            food_positions = food.as_list()
-            neighborhood = [(my_pos[0] + dx, my_pos[1] + dy) for dx in range(-1, 2) for dy in range(-1, 2)]
-            food_concentration = sum(1 for pos in neighborhood if pos in food_positions)
-            features['food_concentration'] = food_concentration
-
         return features
 
     def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2,'food_concentration': 100, 'invader_in_radius': -500}
+        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
